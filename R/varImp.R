@@ -182,16 +182,18 @@ varImp <- function(model,
   permuted_auc <- matrix(nrow = permut, ncol = length(vars))
   set.seed(25)
 
-  for (j in seq_along(vars)) {
-    for (i in seq_len(permut)) {
-      data <- sample(model@data@data[, vars[j]])
-      if (is.factor(model@data@data[, vars[j]]))
-        data <- as.factor(data)
-      train_copy <- model@data
-      train_copy@data[, vars[j]] <- data
-      permuted_auc[i, j] <- auc(model, train_copy)
-    }
+  is_fact <- vapply(vars, function(v) is.factor(model@data@data[, v]), logical(1))
 
+  for (j in seq_along(vars)) {
+    col_data <- model@data@data[, vars[j]]
+    for (i in seq_len(permut)) {
+      if (is_fact[j]) {
+        model@data@data[, vars[j]] <- factor(sample(col_data))
+      } else {
+        model@data@data[, vars[j]] <- sample(col_data)
+      }
+      permuted_auc[i, j] <- auc(model, model@data)
+    }
     if (progress)
       cli::cli_progress_update(id = id, .envir = parent.frame(n = 2))
   }
