@@ -22,6 +22,10 @@
 #' expressed as decimal number.
 #' @param interactive logical. If `FALSE` the interactive chart is not created.
 #' @param progress logical. If `TRUE` shows a progress bar.
+#' @param parallel logical. If `TRUE` trains models in parallel during
+#' the random population initialization and GA child creation.
+#' @param ncores integer. Number of cores to use for parallel training when
+#' `parallel = TRUE`. Default is all available cores minus one.
 #' @param seed numeric. The value used to set the seed to have consistent
 #' results.
 #'
@@ -102,6 +106,8 @@ optimizeModel <- function(model,
                           mutation_chance = 0.4,
                           interactive = TRUE,
                           progress = TRUE,
+                          parallel = FALSE,
+                          ncores = parallel::detectCores() - 1,
                           seed = NULL) {
 
   metric <- match.arg(metric, choices = c("auc", "tss", "aicc"))
@@ -136,6 +142,8 @@ optimizeModel <- function(model,
   remaining <- pop - kept
   tot_models <- .get_total_models(pop, gen, remaining)
   algorithm <- ifelse(gen > 0, "Optimize Model", "Random Search")
+
+  do_parallel <- parallel && pop > 1
 
   if (progress)
     cli::cli_progress_bar(
@@ -201,10 +209,38 @@ optimizeModel <- function(model,
   index <- sample(nrow(grid), size = pop)
 
   # Random search, create random population
+  if (do_parallel) {
+    if (progress)
+      cli::cli_alert_info("Training {pop} initial models in parallel on {min(ncores, pop)} core{?s}...")
+
+    if (.Platform$OS.type == "windows") {
+      ncores <- min(ncores, pop)
+      cl <- parallel::makePSOCKcluster(ncores)
+      on.exit(parallel::stopCluster(cl), add = TRUE)
+      parallel::clusterExport(cl, c("model", "grid", ".create_model_from_settings"),
+                              envir = environment())
+      parallel::clusterEvalQ(cl, library(SDMtune))
+      models <- parallel::clusterApplyLB(cl, seq_len(pop), function(j) {
+        SDMtune:::.create_model_from_settings(model, grid[index[j], ])
+      })
+    } else {
+      ncores <- min(ncores, pop)
+      models <- parallel::mclapply(seq_len(pop), function(j) {
+        .create_model_from_settings(model, grid[index[j], ])
+      }, mc.cores = ncores)
+    }
+  } else {
+    models <- vector("list", length = pop)
+  }
+
   for (i in 1:pop) {
 
-    models[[i]] <- .create_model_from_settings(model,
-                                               grid[index[i], ])
+    if (do_parallel) {
+      # models already trained, just use them
+    } else {
+      models[[i]] <- .create_model_from_settings(model,
+                                                  grid[index[i], ])
+    }
 
     train_metric[i, ] <- list(i, .get_metric(metric, models[[i]], env = env))
 
@@ -289,12 +325,27 @@ optimizeModel <- function(model,
       parents <- models[index_kept]
       models <- parents
 
+        if (do_parallel) {
+          child <- children[[j]]
+        } else {
+          couple <- sample(parents, size = 2)
+          mother <- couple[[1]]
+          father <- couple[[2]]
+          child <- .breed(mother, father, hypers, mutation_chance)
+        }
+      }
+
       for (j in 1:remaining) {
 
-        couple <- sample(parents, size = 2)
-        mother <- couple[[1]]
-        father <- couple[[2]]
-        child <- .breed(mother, father, hypers, mutation_chance)
+      if (do_parallel) {
+          child <- children[[j]]
+        } else {
+          couple <- sample(parents, size = 2)
+          mother <- couple[[1]]
+          father <- couple[[2]]
+          child <- .breed(mother, father, hypers, mutation_chance)
+        }
+
         train_metric[kept + j, ] <- list(kept + j,
                                          .get_metric(metric, child, env = env))
         if (metric != "aicc")

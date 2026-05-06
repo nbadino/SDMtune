@@ -16,6 +16,9 @@
 #' only with "aicc".
 #' @param interactive logical. If `FALSE` the interactive chart is not created.
 #' @param progress logical. If `TRUE` shows a progress bar.
+#' @param parallel logical. If `TRUE` trains models in parallel.
+#' @param ncores integer. Number of cores to use for parallel training when
+#' `parallel = TRUE`. Default is all available cores minus one.
 #' @param seed numeric. The value used to set the seed to have consistent
 #' results.
 #'
@@ -86,6 +89,8 @@ randomSearch <- function(model,
                          env = NULL,
                          interactive = TRUE,
                          progress = TRUE,
+                         parallel = FALSE,
+                         ncores = parallel::detectCores() - 1,
                          seed = NULL) {
 
   metric <- match.arg(metric, choices = c("auc", "tss", "aicc"))
@@ -99,5 +104,7 @@ randomSearch <- function(model,
                 env = env,
                 interactive = interactive,
                 progress = progress,
+                parallel = parallel,
+                ncores = ncores,
                 seed = seed)
 }

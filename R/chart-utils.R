@@ -57,7 +57,6 @@
 .update_data <- function(folder,
                          data) {
   jsonlite::write_json(data, file.path(folder, "data.json"))
-  Sys.sleep(.1)
 }
 
 .start_server <- function(folder) {

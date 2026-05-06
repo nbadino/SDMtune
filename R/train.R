@@ -11,6 +11,10 @@
 #' created with other packages, see details.
 #' @param progress logical. If `TRUE` shows a progress bar during cross
 #' validation.
+#' @param parallel logical. If `TRUE` trains the CV folds in parallel using
+#' \link[parallel]{mclapply}. Only used when `folds` is provided.
+#' @param ncores integer. Number of cores to use for parallel training when
+#' `parallel = TRUE`. Default is all available cores minus one.
 #' @param ... Arguments passed to the relative method, see details.
 #'
 #' @details
@@ -241,6 +245,8 @@ train <- function(method,
                   data,
                   folds = NULL,
                   progress = TRUE,
+                  parallel = FALSE,
+                  ncores = parallel::detectCores() - 1,
                   ...) {
 
   l <- length(method)
@@ -258,7 +264,9 @@ train <- function(method,
       folds <- .convert_folds(folds, data)
       k <- ncol(folds[[1]])
 
-      if (progress) {
+      do_parallel <- parallel && k > 1
+
+      if (progress && !do_parallel)
         cli::cli_progress_bar(
           name = "Cross Validation",
           type = "iterator",
@@ -267,17 +275,44 @@ train <- function(method,
           total = k,
           clear = FALSE
         )
-      }
 
-      models <- vector("list", length = k)
-
-      for (j in 1:k) {
-        train <- .subset_swd(data, folds$train[, j])
-        argus <- c(data = train, ea[names(ea) %in% .args_name(func)])
-        models[[j]] <- do.call(func, args = argus)
-
+      if (do_parallel) {
         if (progress)
-          cli::cli_progress_update()
+          cli::cli_alert_info("Training {k} CV folds in parallel on {min(ncores, k)} core{?s}...")
+
+        if (.Platform$OS.type == "windows") {
+          ncores <- min(ncores, k)
+          cl <- parallel::makePSOCKcluster(ncores)
+          on.exit(parallel::stopCluster(cl), add = TRUE)
+          parallel::clusterExport(cl, c("data", "folds", "func", "ea",
+                                        ".subset_swd", ".args_name"),
+                                  envir = environment())
+          parallel::clusterEvalQ(cl, library(SDMtune))
+          models <- parallel::clusterApplyLB(cl, seq_len(k), function(j) {
+            train_swd <- SDMtune:::.subset_swd(data, folds$train[, j])
+            argus <- c(data = train_swd, ea[names(ea) %in% SDMtune:::.args_name(func)])
+            do.call(func, args = argus)
+          })
+        } else {
+          ncores <- min(ncores, k)
+          models <- parallel::mclapply(seq_len(k), function(j) {
+            train_swd <- .subset_swd(data, folds$train[, j])
+            argus <- c(data = train_swd, ea[names(ea) %in% .args_name(func)])
+            do.call(func, args = argus)
+          }, mc.cores = ncores)
+        }
+
+      } else {
+
+        models <- vector("list", length = k)
+        for (j in 1:k) {
+          train_swd <- .subset_swd(data, folds$train[, j])
+          argus <- c(data = train_swd, ea[names(ea) %in% .args_name(func)])
+          models[[j]] <- do.call(func, args = argus)
+
+          if (progress)
+            cli::cli_progress_update()
+        }
       }
 
       output[[i]] <- SDMmodelCV(models = models, data = data, folds = folds)

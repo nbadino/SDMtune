@@ -18,6 +18,10 @@
 #' combinations to avoid R crashing for memory overload.
 #' @param interactive logical. If `FALSE` the interactive chart is not created.
 #' @param progress logical. If `TRUE` shows a progress bar.
+#' @param parallel logical. If `TRUE` trains the models in parallel using
+#' \link[parallel]{mclapply}.
+#' @param ncores integer. Number of cores to use for parallel training when
+#' `parallel = TRUE`. Default is all available cores minus one.
 #'
 #' @details
 #' To know which hyperparameters can be tuned you can use the output
@@ -96,20 +100,18 @@ gridSearch <- function(model,
                        env = NULL,
                        save_models = TRUE,
                        interactive = TRUE,
-                       progress = TRUE) {
+                       progress = TRUE,
+                       parallel = FALSE,
+                       ncores = parallel::detectCores() - 1) {
 
   metric <- match.arg(metric, choices = c("auc", "tss", "aicc"))
-  # Create a grid with all the possible combination of hyperparameters
   grid <- .get_hypers_grid(model, hypers)
-
-  # Check that arguments are correctly provided
   .check_args(model, metric, test, env, hypers)
 
   if (!is.null(env)) {
     # TODO: Remove with version 2.0.0
-    if (inherits(env, "Raster")) {
+    if (inherits(env, "Raster"))
       .raster_error("rast")
-    }
 
     if (!inherits(env, "SpatRaster"))
       cli::cli_abort(c(
@@ -121,79 +123,111 @@ gridSearch <- function(model,
   if (inherits(model, "SDMmodelCV"))
     test <- TRUE
 
-  if (progress)
+  n <- nrow(grid)
+  do_parallel <- parallel && n > 1
+
+  if (progress && !do_parallel)
     cli::cli_progress_bar(
       name = "Grid Search",
       type = "iterator",
       format = "{cli::pb_name} {cli::pb_bar} {cli::pb_percent} | \\
                 ETA: {cli::pb_eta} - {cli::pb_elapsed_clock}",
-      total = (nrow(grid) + 1),
+      total = n + 1,
       clear = FALSE
     )
 
-  models <- vector("list", length = nrow(grid))
-  train_metric <- data.frame(x = NA_real_, y = NA_real_)
-  val_metric <- data.frame(x = NA_real_, y = NA_real_)
-
   if (interactive) {
-    footer <- vector("character", length = nrow(grid))
-    # Show line only if one hyperparameter is tuned
-    show_line <- ifelse(length(hypers) == 1, TRUE, FALSE)
-
-    # Create chart
+    show_line <- length(hypers) == 1
     settings <- list(metric = .get_metric_label(metric),
-                     max = nrow(grid),
+                     max = n,
                      show_line = show_line,
                      title = "Grid Search",
                      update = TRUE)
-
-    data <- list()
-
     folder <- tempfile("SDMtune-gridSearch")
-
     .create_chart(folder = folder, script = "gridSearch.js",
-                  settings = settings, data = data)
+                  settings = settings, data = list())
     .show_chart(folder)
+    footer <- vector("character", n)
   }
 
-  # Loop through all the settings in grid
-  for (i in seq_len(nrow(grid))) {
+  if (do_parallel) {
+    if (progress)
+      cli::cli_alert_info("Training {n} models in parallel on {min(ncores, n)} core{?s}...")
 
-    obj <- .create_model_from_settings(model, settings = grid[i, ])
+    if (.Platform$OS.type == "windows") {
+      ncores <- min(ncores, n)
+      cl <- parallel::makePSOCKcluster(ncores)
+      on.exit(parallel::stopCluster(cl), add = TRUE)
+      parallel::clusterExport(cl, c("model", "grid", ".create_model_from_settings"),
+                              envir = environment())
+      parallel::clusterEvalQ(cl, library(SDMtune))
+      models <- parallel::clusterApplyLB(cl, seq_len(n), function(i) {
+        SDMtune:::.create_model_from_settings(model, settings = grid[i, ])
+      })
+    } else {
+      ncores <- min(ncores, n)
+      models <- parallel::mclapply(
+        seq_len(n),
+        function(i) .create_model_from_settings(model, settings = grid[i, ]),
+        mc.cores = ncores
+      )
+    }
+  } else {
+    models <- vector("list", n)
+  }
+
+  train_metric <- data.frame(x = numeric(n), y = numeric(n))
+  val_metric <- data.frame(x = numeric(n), y = numeric(n))
+
+  for (i in seq_len(n)) {
+    if (do_parallel) {
+      obj <- models[[i]]
+    } else {
+      obj <- .create_model_from_settings(model, settings = grid[i, ])
+      models[[i]] <- obj
+    }
 
     train_metric[i, ] <- list(i, .get_metric(metric, obj, env = env))
     if (metric != "aicc")
       val_metric[i, ] <- list(i, .get_metric(metric, obj, test))
-
-    if (save_models) {
-      models[[i]] <- obj
-    } else {
-      if (i == 1) {
-        o <- .create_sdmtune_output(list(obj), metric, train_metric, val_metric)
-      } else {
-        o@results[i, ] <- .create_sdmtune_result(obj, metric,
-                                                 train_metric[i, 2],
-                                                 val_metric[i, 2])
-      }
-    }
+    else
+      val_metric[i, ] <- list(i, NA_real_)
 
     if (interactive) {
       footer[i] <- .get_footer(obj)
-      stop <- ifelse(i == nrow(grid), TRUE, FALSE)
-      .update_data(folder, data = list(train = train_metric, val = val_metric,
-                                       gridFooter = footer, stop = stop))
+      .update_data(folder, data = list(
+        train = train_metric, val = val_metric,
+        gridFooter = footer, stop = (i == n)
+      ))
     }
 
-    if (progress)
+    if (progress && !do_parallel)
       cli::cli_progress_update()
   }
 
   if (save_models) {
     o <- .create_sdmtune_output(models, metric, train_metric, val_metric)
   } else {
-    o@models <- list(model)
-    if (metric == "aicc")
-      o@results$delta_AICc <- o@results$AICc - min(o@results$AICc)
+    tunable_hypers <- getTunableArgs(model)
+    labels <- c(tunable_hypers, .get_sdmtune_colnames(metric))
+    res <- as.data.frame(matrix(nrow = n, ncol = length(labels)))
+    colnames(res) <- labels
+    for (hyp in tunable_hypers) {
+      if (hyp == "fc") {
+        res$fc <- as.character(grid[[hyp]])
+      } else if (hyp %in% names(grid)) {
+        res[[hyp]] <- as.character(grid[[hyp]])
+      }
+    }
+    res[[.get_sdmtune_colnames(metric)[1]]] <- train_metric[, 2]
+    if (metric != "aicc") {
+      mc <- .get_sdmtune_colnames(metric)
+      res[[mc[2]]] <- val_metric[, 2]
+      res[[mc[3]]] <- train_metric[, 2] - val_metric[, 2]
+    } else {
+      res$delta_AICc <- res$AICc - min(res$AICc)
+    }
+    o <- SDMtune(results = res, models = list(model))
   }
 
   if (progress)
