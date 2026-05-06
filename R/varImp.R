@@ -11,6 +11,10 @@
 #' @param model \linkS4class{SDMmodel} or \linkS4class{SDMmodelCV} object.
 #' @param permut integer. Number of permutations.
 #' @param progress logical. If `TRUE` shows a progress bar.
+#' @param parallel logical. If `TRUE` computes importance across CV folds in
+#' parallel. Only used with \linkS4class{SDMmodelCV} objects.
+#' @param ncores integer. Number of cores to use for parallel computation when
+#' `parallel = TRUE`. Default is all available cores minus one.
 #'
 #' @details Note that it could return values slightly different from MaxEnt Java
 #' software due to a different random permutation.
@@ -78,7 +82,9 @@
 #' vi}
 varImp <- function(model,
                    permut = 10,
-                   progress = TRUE) {
+                   progress = TRUE,
+                   parallel = FALSE,
+                   ncores = parallel::detectCores() - 1) {
 
   vars <- colnames(model@data@data)
 
@@ -105,12 +111,52 @@ varImp <- function(model,
   } else {
     pis <- matrix(nrow = length(vars), ncol = l)
 
-    for (i in 1:l) {
-      model_auc <- auc(model@models[[i]])
-      df <- .compute_permutation(model@models[[i]], model_auc, vars, permut, id,
-                                 progress)
-      index <- match(df[, 1], vars)
-      pis[, i] <- df[order(index), 2]
+    if (parallel && l > 1) {
+      models_list <- model@models
+      pb_id <- if (progress) id else NULL
+      if (.Platform$OS.type == "windows") {
+        ncores <- min(ncores, l)
+        cl <- parallel::makePSOCKcluster(ncores)
+        on.exit(parallel::stopCluster(cl), add = TRUE)
+        parallel::clusterExport(cl, c("models_list", "vars", "permut",
+                                      ".compute_permutation", "auc",
+                                      "pb_id"),
+                                envir = environment())
+        parallel::clusterEvalQ(cl, library(SDMtune))
+        results <- parallel::clusterApplyLB(cl, seq_len(l), function(i) {
+          model_auc <- auc(models_list[[i]])
+          df <- SDMtune:::.compute_permutation(models_list[[i]], model_auc,
+                                                vars, permut, pb_id, FALSE)
+          list(importance = df[, 2], order = match(df[, 1], vars))
+        })
+      } else {
+        ncores <- min(ncores, l)
+        results <- parallel::mclapply(seq_len(l), function(i) {
+          model_auc <- auc(models_list[[i]])
+          df <- .compute_permutation(models_list[[i]], model_auc,
+                                     vars, permut, pb_id, FALSE)
+          list(importance = df[, 2], order = match(df[, 1], vars))
+        }, mc.cores = ncores)
+      }
+
+      for (i in seq_len(l)) {
+        idx <- results[[i]]$order
+        pis[, i] <- results[[i]]$importance[idx]
+      }
+
+      if (progress)
+        for (k in seq_len(total))
+          cli::cli_progress_update(id = id)
+
+    } else {
+
+      for (i in 1:l) {
+        model_auc <- auc(model@models[[i]])
+        df <- .compute_permutation(model@models[[i]], model_auc, vars, permut, id,
+                                   progress)
+        index <- match(df[, 1], vars)
+        pis[, i] <- df[order(index), 2]
+      }
     }
 
     output <- data.frame(Variable = vars,

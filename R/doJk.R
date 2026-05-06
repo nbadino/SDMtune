@@ -16,6 +16,9 @@
 #' @param return_models logical. If `TRUE` returns all the models together with
 #' the test result.
 #' @param progress logical If `TRUE` shows a progress bar.
+#' @param parallel logical. If `TRUE` trains models in parallel across variables.
+#' @param ncores integer. Number of cores to use for parallel training when
+#' `parallel = TRUE`. Default is all available cores minus one.
 #'
 #' @return A data frame with the test results. If `return_model = TRUE` it
 #' returns a list containing the test results together with the models.
@@ -101,7 +104,9 @@ doJk <- function(model,
                  with_only = TRUE,
                  env = NULL,
                  return_models = FALSE,
-                 progress = TRUE) {
+                 progress = TRUE,
+                 parallel = FALSE,
+                 ncores = parallel::detectCores() - 1) {
 
   metric <- match.arg(metric, c("auc", "tss", "aicc"))
 
@@ -161,51 +166,159 @@ doJk <- function(model,
   if (inherits(model, "SDMmodelCV"))
     t <- TRUE
 
-  for (i in 1:n) {
-    data <- old_model@data
-    data@data[variables[i]] <- NULL
+  do_parallel <- parallel && n > 1
 
-    if (metric != "aicc" & !inherits(model, "SDMmodelCV") & !is.null(test)) {
-      t <- test
-      t@data[variables[i]] <- NULL
+  if (do_parallel) {
+    if (progress)
+      cli::cli_alert_info("Running Jackknife test in parallel on {min(ncores, n)} core{?s}...")
+
+    if (.Platform$OS.type == "windows") {
+      ncores <- min(ncores, n)
+      cl <- parallel::makePSOCKcluster(ncores)
+      on.exit(parallel::stopCluster(cl), add = TRUE)
+      parallel::clusterExport(cl, c("old_model", "variables", "metric", "test",
+                                    "env", "with_only"),
+                              envir = environment())
+      parallel::clusterEvalQ(cl, library(SDMtune))
+      results <- parallel::clusterApplyLB(cl, seq_len(n), function(i) {
+        var <- variables[i]
+        data_wo <- old_model@data
+        data_wo@data[var] <- NULL
+        t_wo <- NULL
+        if (metric != "aicc" & !inherits(old_model, "SDMmodelCV") & !is.null(test)) {
+          t_wo <- test
+          t_wo@data[var] <- NULL
+        }
+        settings <- list("data" = data_wo)
+        jk_model_wo <- SDMtune:::.create_model_from_settings(old_model, settings)
+        train_wo <- SDMtune:::.get_metric(metric, jk_model_wo, env = env)
+        test_wo <- NA_real_
+        if (metric != "aicc" & !is.null(test))
+          test_wo <- SDMtune:::.get_metric(metric, jk_model_wo, test = t_wo)
+        train_wo_only <- NA_real_
+        test_wo_only <- NA_real_
+        jk_model_wo_only <- NULL
+        if (with_only) {
+          data_wo_only <- old_model@data
+          data_wo_only@data <- data_wo_only@data[var]
+          t_wo_only <- NULL
+          if (metric != "aicc" & !inherits(old_model, "SDMmodelCV") & !is.null(test)) {
+            t_wo_only <- test
+            t_wo_only@data <- t_wo_only@data[var]
+          }
+          settings_only <- list("data" = data_wo_only)
+          jk_model_wo_only <- SDMtune:::.create_model_from_settings(old_model, settings_only)
+          train_wo_only <- SDMtune:::.get_metric(metric, jk_model_wo_only, env = env)
+          if (metric != "aicc" & !is.null(test))
+            test_wo_only <- SDMtune:::.get_metric(metric, jk_model_wo_only, test = t_wo_only)
+        }
+        list(train_wo = train_wo, train_wo_only = train_wo_only,
+             test_wo = test_wo, test_wo_only = test_wo_only,
+             model_wo = jk_model_wo, model_wo_only = jk_model_wo_only)
+      })
+    } else {
+      ncores <- min(ncores, n)
+      results <- parallel::mclapply(seq_len(n), function(i) {
+        var <- variables[i]
+        data_wo <- old_model@data
+        data_wo@data[var] <- NULL
+        t_wo <- NULL
+        if (metric != "aicc" & !inherits(old_model, "SDMmodelCV") & !is.null(test)) {
+          t_wo <- test
+          t_wo@data[var] <- NULL
+        }
+        settings <- list("data" = data_wo)
+        jk_model_wo <- .create_model_from_settings(old_model, settings)
+        train_wo <- .get_metric(metric, jk_model_wo, env = env)
+        test_wo <- NA_real_
+        if (metric != "aicc" & !is.null(test))
+          test_wo <- .get_metric(metric, jk_model_wo, test = t_wo)
+        train_wo_only <- NA_real_
+        test_wo_only <- NA_real_
+        jk_model_wo_only <- NULL
+        if (with_only) {
+          data_wo_only <- old_model@data
+          data_wo_only@data <- data_wo_only@data[var]
+          t_wo_only <- NULL
+          if (metric != "aicc" & !inherits(old_model, "SDMmodelCV") & !is.null(test)) {
+            t_wo_only <- test
+            t_wo_only@data <- t_wo_only@data[var]
+          }
+          settings_only <- list("data" = data_wo_only)
+          jk_model_wo_only <- .create_model_from_settings(old_model, settings_only)
+          train_wo_only <- .get_metric(metric, jk_model_wo_only, env = env)
+          if (metric != "aicc" & !is.null(test))
+            test_wo_only <- .get_metric(metric, jk_model_wo_only, test = t_wo_only)
+        }
+        list(train_wo = train_wo, train_wo_only = train_wo_only,
+             test_wo = test_wo, test_wo_only = test_wo_only,
+             model_wo = jk_model_wo, model_wo_only = jk_model_wo_only)
+      }, mc.cores = ncores)
     }
 
-    settings <- list("data" = data)
+    for (i in seq_len(n)) {
+      r <- results[[i]]
+      res[i, 2] <- r$train_wo
+      res[i, 3] <- r$train_wo_only
+      res[i, 4] <- r$test_wo
+      res[i, 5] <- r$test_wo_only
+      models_without[[i]] <- r$model_wo
+      if (with_only)
+        models_withonly[[i]] <- r$model_wo_only
+      if (progress) {
+        cli::cli_progress_update()
+        if (with_only) cli::cli_progress_update()
+      }
+    }
 
-    jk_model <- .create_model_from_settings(model, settings)
+  } else {
 
-    res[i, 2] <- .get_metric(metric, jk_model, env = env)
-
-    if (metric != "aicc" & !is.null(test))
-      res[i, 4] <- .get_metric(metric, jk_model, test = t)
-
-    models_without[[i]] <- jk_model
-
-    if (progress)
-      cli::cli_progress_update()
-
-    if (with_only) {
+    for (i in 1:n) {
       data <- old_model@data
-      data@data <- data@data[variables[i]]
+      data@data[variables[i]] <- NULL
 
       if (metric != "aicc" & !inherits(model, "SDMmodelCV") & !is.null(test)) {
         t <- test
-        t@data <- t@data[variables[i]]
+        t@data[variables[i]] <- NULL
       }
 
       settings <- list("data" = data)
 
       jk_model <- .create_model_from_settings(model, settings)
 
-      res[i, 3] <- .get_metric(metric, jk_model, env = env)
+      res[i, 2] <- .get_metric(metric, jk_model, env = env)
 
       if (metric != "aicc" & !is.null(test))
-        res[i, 5] <- .get_metric(metric, jk_model, test = t)
+        res[i, 4] <- .get_metric(metric, jk_model, test = t)
 
-      models_withonly[[i]] <- jk_model
+      models_without[[i]] <- jk_model
 
       if (progress)
         cli::cli_progress_update()
+
+      if (with_only) {
+        data <- old_model@data
+        data@data <- data@data[variables[i]]
+
+        if (metric != "aicc" & !inherits(model, "SDMmodelCV") & !is.null(test)) {
+          t <- test
+          t@data <- t@data[variables[i]]
+        }
+
+        settings <- list("data" = data)
+
+        jk_model <- .create_model_from_settings(model, settings)
+
+        res[i, 3] <- .get_metric(metric, jk_model, env = env)
+
+        if (metric != "aicc" & !is.null(test))
+          res[i, 5] <- .get_metric(metric, jk_model, test = t)
+
+        models_withonly[[i]] <- jk_model
+
+        if (progress)
+          cli::cli_progress_update()
+      }
     }
   }
 

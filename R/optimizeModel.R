@@ -325,19 +325,31 @@ optimizeModel <- function(model,
       parents <- models[index_kept]
       models <- parents
 
-        if (do_parallel) {
-          child <- children[[j]]
+      if (do_parallel) {
+        if (.Platform$OS.type == "windows") {
+          ncores <- min(ncores, remaining)
+          cl <- parallel::makePSOCKcluster(ncores)
+          parallel::clusterExport(cl, c("parents", "hypers", "mutation_chance",
+                                        ".breed", ".get_train_args"),
+                                  envir = environment())
+          parallel::clusterEvalQ(cl, library(SDMtune))
+          children <- parallel::clusterApplyLB(cl, seq_len(remaining), function(k) {
+            couple <- sample(parents, size = 2)
+            SDMtune:::.breed(couple[[1]], couple[[2]], hypers, mutation_chance)
+          })
+          parallel::stopCluster(cl)
         } else {
-          couple <- sample(parents, size = 2)
-          mother <- couple[[1]]
-          father <- couple[[2]]
-          child <- .breed(mother, father, hypers, mutation_chance)
+          ncores <- min(ncores, remaining)
+          children <- parallel::mclapply(seq_len(remaining), function(k) {
+            couple <- sample(parents, size = 2)
+            .breed(couple[[1]], couple[[2]], hypers, mutation_chance)
+          }, mc.cores = ncores)
         }
       }
 
       for (j in 1:remaining) {
 
-      if (do_parallel) {
+        if (do_parallel) {
           child <- children[[j]]
         } else {
           couple <- sample(parents, size = 2)
