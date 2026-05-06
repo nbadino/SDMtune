@@ -219,6 +219,7 @@ doJk <- function(model,
     } else {
       ncores <- min(ncores, n)
       results <- parallel::mclapply(seq_len(n), function(i) {
+        Sys.setenv(OMP_NUM_THREADS = "1")
         var <- variables[i]
         data_wo <- old_model@data
         data_wo@data[var] <- NULL

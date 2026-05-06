@@ -168,9 +168,10 @@ gridSearch <- function(model,
       ncores <- min(ncores, n)
       models <- parallel::mclapply(
         seq_len(n),
-        function(i) .create_model_from_settings(model, settings = grid[i, ]),
-        mc.cores = ncores
-      )
+        function(i) {
+          Sys.setenv(OMP_NUM_THREADS = "1")
+          .create_model_from_settings(model, settings = grid[i, ])
+            }, mc.cores = ncores)
     }
   } else {
     models <- vector("list", n)

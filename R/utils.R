@@ -1,3 +1,11 @@
+# Set environment to avoid BLAS/OpenMP oversubscription in parallel workers
+.set_worker_env <- function() {
+  Sys.setenv(OMP_NUM_THREADS = 1)
+  Sys.setenv(OPENBLAS_NUM_THREADS = 1)
+  Sys.setenv(MKL_NUM_THREADS = 1)
+  Sys.setenv(VECLIB_MAXIMUM_THREADS = 1)
+}
+
 # Get presence locations from an SWD object
 .get_presence <- function(swd) {
 

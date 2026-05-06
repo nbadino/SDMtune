@@ -224,10 +224,11 @@ optimizeModel <- function(model,
         SDMtune:::.create_model_from_settings(model, grid[index[j], ])
       })
     } else {
-      ncores <- min(ncores, pop)
-      models <- parallel::mclapply(seq_len(pop), function(j) {
-        .create_model_from_settings(model, grid[index[j], ])
-      }, mc.cores = ncores)
+        ncores <- min(ncores, pop)
+          models <- parallel::mclapply(seq_len(pop), function(j) {
+            Sys.setenv(OMP_NUM_THREADS = "1")
+            .create_model_from_settings(model, grid[index[j], ])
+          }, mc.cores = ncores)
     }
   } else {
     models <- vector("list", length = pop)
@@ -341,6 +342,7 @@ optimizeModel <- function(model,
         } else {
           ncores <- min(ncores, remaining)
           children <- parallel::mclapply(seq_len(remaining), function(k) {
+            Sys.setenv(OMP_NUM_THREADS = "1")
             couple <- sample(parents, size = 2)
             .breed(couple[[1]], couple[[2]], hypers, mutation_chance)
           }, mc.cores = ncores)

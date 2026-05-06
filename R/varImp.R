@@ -130,13 +130,14 @@ varImp <- function(model,
           list(importance = df[, 2], order = match(df[, 1], vars))
         })
       } else {
-        ncores <- min(ncores, l)
-        results <- parallel::mclapply(seq_len(l), function(i) {
-          model_auc <- auc(models_list[[i]])
-          df <- .compute_permutation(models_list[[i]], model_auc,
-                                     vars, permut, pb_id, FALSE)
-          list(importance = df[, 2], order = match(df[, 1], vars))
-        }, mc.cores = ncores)
+              ncores <- min(ncores, l)
+              results <- parallel::mclapply(seq_len(l), function(i) {
+                Sys.setenv(OMP_NUM_THREADS = "1")
+                model_auc <- auc(models_list[[i]])
+                df <- .compute_permutation(models_list[[i]], model_auc,
+                                           vars, permut, pb_id, FALSE)
+                list(importance = df[, 2], order = match(df[, 1], vars))
+              }, mc.cores = ncores)
       }
 
       for (i in seq_len(l)) {
