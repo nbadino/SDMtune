@@ -21,7 +21,7 @@
 #' @param parallel logical. If `TRUE` trains the models in parallel using
 #' \link[parallel]{mclapply}.
 #' @param ncores integer. Number of cores to use for parallel training when
-#' `parallel = TRUE`. Default is all available cores minus one.
+#' `parallel = TRUE`. Default is min(detectCores() - 1, 20, n_combos).
 #'
 #' @details
 #' To know which hyperparameters can be tuned you can use the output
@@ -102,7 +102,7 @@ gridSearch <- function(model,
                        interactive = TRUE,
                        progress = TRUE,
                        parallel = FALSE,
-                       ncores = parallel::detectCores() - 1) {
+                       ncores = NULL) {
 
   metric <- match.arg(metric, choices = c("auc", "tss", "aicc"))
   grid <- .get_hypers_grid(model, hypers)
@@ -151,28 +151,18 @@ gridSearch <- function(model,
   }
 
   if (do_parallel) {
+    if (is.null(ncores)) ncores <- .optimal_cores(n)
+    ncores <- min(ncores, n)
     if (progress)
-      cli::cli_alert_info("Training {n} models in parallel on {min(ncores, n)} core{?s}...")
-
-    if (.Platform$OS.type == "windows") {
-      ncores <- min(ncores, n)
-      cl <- parallel::makePSOCKcluster(ncores)
-      on.exit(parallel::stopCluster(cl), add = TRUE)
-      parallel::clusterExport(cl, c("model", "grid", ".create_model_from_settings"),
-                              envir = environment())
-      parallel::clusterEvalQ(cl, library(SDMtune))
-      models <- parallel::clusterApplyLB(cl, seq_len(n), function(i) {
-        SDMtune:::.create_model_from_settings(model, settings = grid[i, ])
-      })
-    } else {
-      ncores <- min(ncores, n)
-      models <- parallel::mclapply(
-        seq_len(n),
-        function(i) {
-          Sys.setenv(OMP_NUM_THREADS = "1")
-          .create_model_from_settings(model, settings = grid[i, ])
-            }, mc.cores = ncores)
-    }
+      cli::cli_alert_info("Training {n} models in parallel on {ncores} core{?s}...")
+    cl <- parallel::makePSOCKcluster(ncores)
+    on.exit(parallel::stopCluster(cl), add = TRUE)
+    parallel::clusterExport(cl, c("model", "grid", ".create_model_from_settings"),
+                            envir = environment())
+    parallel::clusterEvalQ(cl, { Sys.setenv(OMP_NUM_THREADS = "1"); library(SDMtune) })
+    models <- parallel::clusterApplyLB(cl, seq_len(n), function(i) {
+      SDMtune:::.create_model_from_settings(model, settings = grid[i, ])
+    })
   } else {
     models <- vector("list", n)
   }

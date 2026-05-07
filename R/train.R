@@ -246,7 +246,7 @@ train <- function(method,
                   folds = NULL,
                   progress = TRUE,
                   parallel = FALSE,
-                  ncores = parallel::detectCores() - 1,
+                  ncores = NULL,
                   ...) {
 
   l <- length(method)
@@ -277,31 +277,21 @@ train <- function(method,
         )
 
       if (do_parallel) {
+        if (is.null(ncores)) ncores <- .optimal_cores(k)
+        ncores <- min(ncores, k)
         if (progress)
-          cli::cli_alert_info("Training {k} CV folds in parallel on {min(ncores, k)} core{?s}...")
-
-        if (.Platform$OS.type == "windows") {
-          ncores <- min(ncores, k)
-          cl <- parallel::makePSOCKcluster(ncores)
-          on.exit(parallel::stopCluster(cl), add = TRUE)
-          parallel::clusterExport(cl, c("data", "folds", "func", "ea",
-                                        ".subset_swd", ".args_name"),
-                                  envir = environment())
-          parallel::clusterEvalQ(cl, library(SDMtune))
-          models <- parallel::clusterApplyLB(cl, seq_len(k), function(j) {
-            train_swd <- SDMtune:::.subset_swd(data, folds$train[, j])
-            argus <- c(data = train_swd, ea[names(ea) %in% SDMtune:::.args_name(func)])
-            do.call(func, args = argus)
-          })
-                } else {
-                  ncores <- min(ncores, k)
-                  models <- parallel::mclapply(seq_len(k), function(j) {
-                    Sys.setenv(OMP_NUM_THREADS = "1")
-                    train_swd <- .subset_swd(data, folds$train[, j])
-                    argus <- c(data = train_swd, ea[names(ea) %in% .args_name(func)])
-                    do.call(func, args = argus)
-                  }, mc.cores = ncores)
-        }
+          cli::cli_alert_info("Training {k} CV folds in parallel on {ncores} core{?s}...")
+        cl <- parallel::makePSOCKcluster(ncores)
+        on.exit(parallel::stopCluster(cl), add = TRUE)
+        parallel::clusterExport(cl, c("data", "folds", "func", "ea",
+                                      ".subset_swd", ".args_name"),
+                                envir = environment())
+        parallel::clusterEvalQ(cl, { Sys.setenv(OMP_NUM_THREADS = "1"); library(SDMtune) })
+        models <- parallel::clusterApplyLB(cl, seq_len(k), function(j) {
+          train_swd <- SDMtune:::.subset_swd(data, folds$train[, j])
+          argus <- c(data = train_swd, ea[names(ea) %in% SDMtune:::.args_name(func)])
+          do.call(func, args = argus)
+        })
 
       } else {
 

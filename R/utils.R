@@ -1,3 +1,23 @@
+# Binary search: count elements in sorted vector x that are < val
+.bsearch_count <- function(x, val) {
+  lo <- 1L
+  hi <- length(x)
+  while (lo <= hi) {
+    mid <- lo + (hi - lo) %/% 2L
+    if (x[mid] < val) lo <- mid + 1L else hi <- mid - 1L
+  }
+  hi
+}
+
+# Number of workers for PSOCK clusters. Caps at 20 because beyond that
+# overhead (memory + connection setup) outweighs parallelism gains for
+# typical SDMtune workloads (grid search, CV folds, variable loops).
+# Never exceeds n_tasks or detectCores() - 1.
+.optimal_cores <- function(n_tasks) {
+  max_workers <- min(parallel::detectCores() - 1L, 20L)
+  min(n_tasks, max(max_workers, 1L))
+}
+
 # Set environment to avoid BLAS/OpenMP oversubscription in parallel workers
 .set_worker_env <- function() {
   Sys.setenv(OMP_NUM_THREADS = 1)
